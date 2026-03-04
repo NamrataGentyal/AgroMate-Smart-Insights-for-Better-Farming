@@ -1,1 +1,1 @@
-# AgroMate-Smart-Insights-for-Better-Farming
+# AgroMate
