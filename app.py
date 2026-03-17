@@ -103,10 +103,26 @@ FERTILIZER_LABELS = [
 ]
 
 DISEASE_LABELS = [
-    "Healthy", "Apple Scab", "Black Rot", "Cedar Apple Rust",
-    "Bacterial Spot", "Early Blight", "Late Blight",
-    "Leaf Mold", "Septoria Leaf Spot", "Spider Mites",
-    "Target Spot", "Tomato Yellow Leaf Curl Virus", "Tomato Mosaic Virus"
+    "Apple: Apple Scab", "Apple: Black Rot", "Apple: Cedar Apple Rust", "Apple: Healthy",
+    "Blueberry: Healthy",
+    "Cherry: Powdery Mildew", "Cherry: Healthy",
+    "Corn: Cercospora Leaf Spot / Gray Leaf Spot", "Corn: Common Rust",
+    "Corn: Northern Leaf Blight", "Corn: Healthy",
+    "Grape: Black Rot", "Grape: Esca (Black Measles)",
+    "Grape: Leaf Blight (Isariopsis Leaf Spot)", "Grape: Healthy",
+    "Orange: Haunglongbing (Citrus Greening)",
+    "Peach: Bacterial Spot", "Peach: Healthy",
+    "Pepper Bell: Bacterial Spot", "Pepper Bell: Healthy",
+    "Potato: Early Blight", "Potato: Late Blight", "Potato: Healthy",
+    "Raspberry: Healthy",
+    "Soybean: Healthy",
+    "Squash: Powdery Mildew",
+    "Strawberry: Leaf Scorch", "Strawberry: Healthy",
+    "Tomato: Bacterial Spot", "Tomato: Early Blight", "Tomato: Late Blight",
+    "Tomato: Leaf Mold", "Tomato: Septoria Leaf Spot",
+    "Tomato: Spider Mites (Two-Spotted Spider Mite)",
+    "Tomato: Target Spot", "Tomato: Yellow Leaf Curl Virus",
+    "Tomato: Mosaic Virus", "Tomato: Healthy"
 ]
 
 
@@ -353,10 +369,51 @@ def disease_detection():
                            result=result, error=error)
 
 
+Weather_API_KEY = os.environ.get('Weather_API_KEY', '')
+
+@app.route("/api/weather")
+def get_weather_api():
+    """JSON API for dynamic weather fetching from client-side geolocation."""
+    lat = request.args.get("lat")
+    lon = request.args.get("lon")
+
+    if not lat or not lon:
+        return {"error": "lat and lon required"}, 400
+
+    default_data = {
+        "temperature": 28,
+        "humidity": 65,
+        "condition": "Partly Cloudy",
+        "wind_speed": 14,
+        "rainfall_chance": 30,
+        "uv_index": 6
+    }
+
+    # Fetch real data if API key available
+    if Weather_API_KEY:
+        try:
+            url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={Weather_API_KEY}&units=metric"
+            response = requests.get(url, timeout=5)
+            data = response.json()
+            
+            if "main" in data and "weather" in data and "wind" in data:
+                return {
+                    "temperature": round(data["main"]["temp"], 1),
+                    "humidity": data["main"]["humidity"],
+                    "condition": data["weather"][0]["description"].title(),
+                    "wind_speed": round(data["wind"]["speed"], 1),
+                    "rainfall_chance": 30,
+                    "uv_index": 6
+                }, 200
+        except Exception as e:
+            print(f"[AgroMate] Weather API error: {e}")
+    
+    return default_data, 200
+
 @app.route("/weather-insights")
 @login_required
 def weather_insights():
-    # Static demo data – integrate a real weather API here
+    # Default demo data for initial page load
     weather_data = {
         "city": "Pune, Maharashtra",
         "temperature": 28,
@@ -385,6 +442,61 @@ DATA_GOV_API_KEY = os.environ.get('DATA_GOV_API_KEY', '')
 # data.gov.in resource ID for daily mandi prices
 _MANDI_RESOURCE = "9ef84268-d588-465a-a308-a864a43d0070"
 
+# ─── CACHE FOR MANDI PRICES DATA (Speeds up lookups) ──────────
+# Stores all market records fetched from data.gov.in in memory
+_MANDI_CACHE = []
+_MANDI_CACHE_LOADED = False
+_MANDI_CACHE_LOADING = False  # Flag to prevent multiple simultaneous loads
+
+def _load_mandi_cache():
+    """
+    Fetch ALL mandi records from data.gov.in API once and cache in memory.
+    This is called LAZILY on first request (not on startup) for faster startup.
+    """
+    global _MANDI_CACHE, _MANDI_CACHE_LOADED, _MANDI_CACHE_LOADING
+    
+    if _MANDI_CACHE_LOADED or _MANDI_CACHE_LOADING:
+        return  # Already loaded or loading
+    
+    _MANDI_CACHE_LOADING = True
+    print("[CACHE] Starting lazy load of mandi data...")
+    
+    try:
+        if not DATA_GOV_API_KEY:
+            print("[ERROR] DATA_GOV_API_KEY not configured - cache load failed")
+            _MANDI_CACHE_LOADING = False
+            return
+        
+        params = {
+            "api-key": DATA_GOV_API_KEY,
+            "format": "json",
+            "limit": 10000,
+            "offset": 0
+        }
+        
+        resp = http_requests.get(
+            f"https://api.data.gov.in/resource/{_MANDI_RESOURCE}",
+            params=params,
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _MANDI_CACHE = data.get("records", [])
+        _MANDI_CACHE_LOADED = True
+        
+        states = set(r.get("state", "").strip() for r in _MANDI_CACHE if r.get("state"))
+        commodities = set(r.get("commodity", "").strip() for r in _MANDI_CACHE if r.get("commodity"))
+        
+        print(f"[CACHE] ✓ Lazy load complete: {len(_MANDI_CACHE)} records")
+        print(f"[CACHE] ✓ States: {len(states)} | Commodities: {len(commodities)}")
+        
+    except http_requests.exceptions.Timeout:
+        print("[ERROR] Cache load timeout - data.gov.in API took too long")
+    except Exception as e:
+        print(f"[ERROR] Failed to load mandi cache: {str(e)}")
+    finally:
+        _MANDI_CACHE_LOADING = False
+
 # Commodity choices shown in the UI
 MARKET_COMMODITIES = [
     "Tomato", "Potato", "Onion", "Rice", "Wheat", "Maize",
@@ -408,6 +520,8 @@ def market_prices():
 
         if not DATA_GOV_API_KEY:
             error = "DATA_GOV_API_KEY is not configured. Add it to your .env file."
+        elif not state:
+            error = "Please enter a state name."
         else:
             try:
                 params = {
@@ -415,9 +529,8 @@ def market_prices():
                     "format":             "json",
                     "limit":              100,
                     "filters[commodity]": commodity,
+                    "filters[state]":     state,
                 }
-                if state:
-                    params["filters[state]"] = state
 
                 resp = http_requests.get(
                     f"https://api.data.gov.in/resource/{_MANDI_RESOURCE}",
@@ -427,9 +540,49 @@ def market_prices():
                 resp.raise_for_status()
                 data = resp.json()
                 records = data.get("records", [])
+                
+                # Debug: Log API response info
+                print(f"[DEBUG] API Search: commodity='{commodity}', state='{state}'")
+                print(f"[DEBUG] API Response count: {data.get('count', 0)}")
+                print(f"[DEBUG] Records found: {len(records)}")
+                
+                # Debug: Show what states are actually in the records
+                if records:
+                    states_in_records = set(r.get("state", "").strip() for r in records)
+                    print(f"[DEBUG] States in records: {states_in_records}")
+                    print(f"[DEBUG] First record: {records[0]}")
+                    
+                    # Filter to only keep records matching the requested state (in case API returns mixed results)
+                    records = [r for r in records if r.get("state", "").strip().lower() == state.lower()]
+                    print(f"[DEBUG] After filtering: {len(records)} records")
+                
                 if not records:
-                    location = f" in {state}" if state else ""
-                    error = f"No market data found for '{commodity}'{location}. Try a different state or commodity."
+                    error = f"No market data found for '{commodity}' in {state}. Try checking the spelling or try a different commodity."
+                    
+                    # Also suggest available states
+                    print(f"[DEBUG] No records found - checking available states...")
+                    try:
+                        # Query API without state filter to find what states have data
+                        params_all = {
+                            "api-key": DATA_GOV_API_KEY,
+                            "format": "json",
+                            "limit": 500,
+                        }
+                        resp_all = http_requests.get(
+                            f"https://api.data.gov.in/resource/{_MANDI_RESOURCE}",
+                            params=params_all,
+                            timeout=10
+                        )
+                        resp_all.raise_for_status()
+                        data_all = resp_all.json()
+                        available_states = sorted(list(set(
+                            r.get("state", "").strip() for r in data_all.get("records", []) if r.get("state")
+                        )))
+                        print(f"[DEBUG] Available states with data: {available_states}")
+                        if available_states:
+                            error += f"\n\nAvailable states: {', '.join(available_states)}"
+                    except Exception as e:
+                        print(f"[DEBUG] Could not fetch available states: {e}")
             except http_requests.exceptions.Timeout:
                 error = "Request timed out. The data.gov.in API is slow right now — please try again."
             except Exception as e:
@@ -446,7 +599,7 @@ def market_prices():
         output = si.getvalue()
         from flask import Response
         return Response(output, mimetype="text/csv",
-                        headers={"Content-Disposition": f"attachment;filename=market_prices_{commodity}.csv"})
+                        headers={"Content-Disposition": f"attachment;filename=market_prices_{commodity}_{state}.csv"})
 
     return render_template(
         "market_prices.html",
@@ -456,6 +609,65 @@ def market_prices():
         commodities=MARKET_COMMODITIES,
         error=error
     )
+
+
+@app.route("/api/market-states", methods=["GET"])
+@login_required
+def get_market_states():
+    """Fetch all available states from cache (instant - no API call)"""
+    try:
+        # Lazy load cache on first request
+        if not _MANDI_CACHE_LOADED and not _MANDI_CACHE_LOADING:
+            print("[DEBUG] get_market_states: Triggering lazy cache load...")
+            _load_mandi_cache()
+        
+        if not _MANDI_CACHE:
+            print("[DEBUG] get_market_states: Cache still loading or empty, returning loading status")
+            return {"states": [], "loading": True, "message": "Loading market data... please wait"}, 202
+        
+        # Extract unique states from cache (instant lookup)
+        states = sorted(list(set(r.get("state", "").strip() for r in _MANDI_CACHE if r.get("state"))))
+        print(f"[DEBUG] get_market_states: Returning {len(states)} states from cache (instant)")
+        
+        return {"states": states, "count": len(_MANDI_CACHE), "loading": False}, 200
+    
+    except Exception as e:
+        print(f"[ERROR] get_market_states: {str(e)}")
+        return {"states": [], "error": str(e)}, 500
+
+
+@app.route("/api/market-commodities", methods=["GET"])
+@login_required
+def get_market_commodities():
+    """Fetch commodities available for a given state (from cache - instant)"""
+    try:
+        state = request.args.get("state", "").strip()
+        
+        if not state:
+            return {"commodities": [], "error": "State parameter required"}, 400
+        
+        # Lazy load cache on first request
+        if not _MANDI_CACHE_LOADED and not _MANDI_CACHE_LOADING:
+            print("[DEBUG] get_market_commodities: Triggering lazy cache load...")
+            _load_mandi_cache()
+        
+        if not _MANDI_CACHE:
+            print("[DEBUG] get_market_commodities: Cache still loading or empty")
+            return {"commodities": [], "loading": True, "message": "Loading market data... please wait"}, 202
+        
+        # Extract commodities for this state from cache (instant lookup)
+        commodities = sorted(list(set(
+            r.get("commodity", "").strip() 
+            for r in _MANDI_CACHE 
+            if r.get("state", "").strip().lower() == state.lower() and r.get("commodity")
+        )))
+        print(f"[DEBUG] get_market_commodities: {len(commodities)} commodities in {state} (instant from cache)")
+        
+        return {"commodities": commodities, "state": state, "count": len(commodities), "loading": False}, 200
+    
+    except Exception as e:
+        print(f"[ERROR] get_market_commodities: {str(e)}")
+        return {"commodities": [], "error": str(e)}, 500
 
 
 # ── Chatbot (Groq – llama-3.3-70b-versatile) ──
@@ -539,11 +751,12 @@ def chatbot():
         return jsonify({"reply": f"⚠️ Sorry, something went wrong. Please try again. ({error_msg[:80]})"})
 
 
-
 # ─────────────────────────────────────────────
 # Create tables on startup (works with both gunicorn and direct run)
 with app.app_context():
     db.create_all()
+    print("[STARTUP] ✓ AgroMate server starting... (market data will load on first request)")
 
 if __name__ == "__main__":
     app.run(debug=True)
+
